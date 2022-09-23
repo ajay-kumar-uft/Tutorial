@@ -20,6 +20,129 @@ While using Proguard, the Applications code is converted to Java bytecode by the
 Proguard using the rules which we have written. Then dex converts it to optimized Dalvik byte code.
 While using R8, first the app's code is converted to Java bytecode by the java compiler and then using R8 directly, 
 it converts the java byte code in Dalvik bytecode. R8 coming as a default compile-time optimizer.
+------------------------------------------------------
+
+Proguard:-
+Is it possible to tell the ProGuard to completely skip the class if there is native function in it
+
+Use these rules:
+
+-keepclasseswithmembers class com.your.packages.** {
+    native <methods>;
+}
+-keepclassmembers class com.your.packages.** {
+    native <methods>;
+}
+Note, that "completely skipping" class with Proguard is a always bad idea, because it may also indirectly keep some classes, used from code of your kept classes. Instead I recommend the following mode:
+
+-keepclasseswithmembers,allowshrinking,allowoptimization class com.your.packages.** {
+    native <methods>;
+}
+-keepclassmembers class com.your.packages.** {
+    native <methods>;
+}
+It will allow shrinking and optimizing code of non-native methods, present in the same class.
+
+You can do even better: if your native methods are resolved by names (e.g. they are called something like Java_com_your_packages_methodName), and you don't use RegisterNatives to register them explicitly, you may allow shrinking away unused native methods by removing the second rule, which will leave only
+
+-keepclasseswithmembers,allowshrinking,allowoptimization class com.your.packages.** {
+    native <methods>;
+}
+If you want some of class members to be accessible from JNI (e.g. you have some static callback methods to be called from native code), you should keep them explicitly: annotate each such member with specialized annotation and use an annotation-based rule to keep them:
+
+-keepclassmembers,allowoptimization,includedescriptorclasses class com.your.packages.** {
+    @android.support.annotation.Keep *;
+}
+You can use your own annotation in place of the one from Android support library — in fact, it is better to use your own in order to avoid interference from existing consumer rules, coming from Android Gradle plugin or other libraries.
+
+In general, I recommend you to reduce the amount of friction between JNI and Java code as much as possible. If you have multiple related Java methods, called from JNI, try to put them together in the same method:
+
+@Keep
+public static void callback(int action, String arg) {
+    switch (action) {
+        ...
+    }
+}
+Throw your exceptions from Java code (you was going to reflectively invoke their constructors anyway, so may as well invoke a static helper method instead):
+
+@Keep
+public static void throwException(int type, String message) {
+    switch (type) {
+        case 0:
+            throw new BadThingsHappenedException(message);
+        case 1:
+            throw new AllHopeIsLostError();
+        ...
+    }
+}
+If you have a class, that has to be passed to JNI, try to pass individual fields instead of that class:
+
+public final class DataClass {
+    int intField;
+    String stringField;
+
+    public void doSomeNativeOperation() {
+        JNI.doSomeNativeOperation(this);
+    }
+}
+
+public final class JNI {
+    public static void doSomeNativeOperation(DataClass arg) {
+        doSomeNativeOperation0(arg.intField, arg.stringField);
+    }
+
+    private static native void doSomeNativeOperation0(int intField, String stringField);
+}
+If you have a native peer class (a class, closely connected to some structure in native memory), you can keep a pointer to native structure in that class in long field, and pass that field to native methods. Then in native methods cast that long to pointer:
+
+public final class Peer {
+    long pointer;
+
+    // constructor is invoked from JNI
+    @Keep
+    protected Peer(long pointer) {
+        this.pointer = pointer;
+    }
+
+    public void doSomeNativeOperation() {
+        JNI.doSomeNativeOperation(this);
+    }
+}
+
+public final class JNI {
+    public static void doSomeNativeOperation(Peer peer) {
+        doSomeNativeOperation0(peer.pointer);
+    }
+
+    private static native void doSomeNativeOperation0(long pointer);
+}
+And in native code:
+
+void JNIEXPORT Java_com_your_packages_methodName(JNIEnv* env, jobject type, jlong ptr) {
+    struct my_struct peer = (struct my_struc*) (intptr_t) ptr;
+    ...
+}
+These simple rules will allow you to fully obfuscate any huge application using JNI, except for a single small class, that contains all native methods.
+
+I suggest you go even further and push for repackaging classes, referenced by native callbacks.
+
+Instead of
+
+@Keep
+public static void callback(YourCustomType arg) {
+    ...
+}
+You can omit a type of parameter by replacing it with Object:
+
+@Keep
+public static void callback(Object arg) {
+    // this cast won't make much difference in performance, but it makes huge
+    // difference for Proguard!
+    YourCustomType instance = (YourCustomType) arg;
+
+    ...
+}
+This will let you obfuscate and repackage even types of callback arguments.
 
 ------------------------------------------------------
 LiveData:- LiveData is an observable data holder class. LiveData is lifecycle-aware means it only updates app component observers that are in an active lifecycle state.
